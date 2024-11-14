@@ -43,11 +43,11 @@ func handleTaskSubmission(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// generate a simple ID for the task (e.g., using current timestamp)
-	task.ID = "tas-" + fmt.Sprint(time.Now().UnixNano())
+	task.ID = "task" + fmt.Sprint(time.Now().UnixNano())
 	task.Status = "submitted"
 
 	// Engueue the task into Redis queue
-	if err := redisQueue.Enqueue(task.ID, task.Payload); err != nil {
+	if err := redisQueue.Enqueue("task_queue", task.ID, task.Payload, task.Status); err != nil {
 		http.Error(w, "Failed to enqueue task", http.StatusInternalServerError)
 		return
 	}

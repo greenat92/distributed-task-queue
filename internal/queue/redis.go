@@ -28,12 +28,20 @@ func NewRedisQueue(addr string) *RedisQueue {
 }
 
 // engqueue function
-func (q *RedisQueue) Enqueue(taskID string, payload string) error {
+func (q *RedisQueue) Enqueue(key string, taskID string, payload string, status string) error {
 	// push the task into the Redis list
-	err := q.client.RPush(ctx, "task_queue", taskID+"|"+payload).Err()
+	err := q.client.RPush(ctx, key, taskID+"|"+payload+"|"+status).Err()
 	if err != nil {
 		return err
 	}
 	log.Printf("task enqueued: %s\n", taskID)
 	return nil
+}
+
+func (q *RedisQueue) Dequeue(queueName string) (string, error) {
+	task, err := q.client.LPop(ctx, queueName).Result()
+	if err == redis.Nil {
+		return "", nil // No task in the queue
+	}
+	return task, err
 }
