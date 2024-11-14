@@ -8,11 +8,17 @@ import (
 	"time"
 
 	"distributed-task-queue/internal"
+	"distributed-task-queue/internal/queue"
 
 	"github.com/gorilla/mux"
 )
 
+var redisQueue *queue.RedisQueue
+
 func main() {
+	// init the redis queue
+	redisQueue = queue.NewRedisQueue("localhost:6379")
+
 	router := mux.NewRouter()
 	router.HandleFunc("/tasks", handleTaskSubmission).Methods("POST")
 
@@ -40,8 +46,11 @@ func handleTaskSubmission(w http.ResponseWriter, r *http.Request) {
 	task.ID = "tas-" + fmt.Sprint(time.Now().UnixNano())
 	task.Status = "submitted"
 
-	// for now, just log the task as a placeholder for queueing logic
-	log.Printf("Task received: %+v\n", task)
+	// Engueue the task into Redis queue
+	if err := redisQueue.Enqueue(task.ID, task.Payload); err != nil {
+		http.Error(w, "Failed to enqueue task", http.StatusInternalServerError)
+		return
+	}
 
 	// Respond to the client with the task ID
 	w.Header().Set("Content-Type", "application/json")
