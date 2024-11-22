@@ -45,3 +45,31 @@ func (q *RedisQueue) Dequeue(queueName string) (string, error) {
 	}
 	return task, err
 }
+
+// SetTaskStatus updates the status of a task in redis
+func (q *RedisQueue) SetTaskStatus(key string, taskID string, status string) error {
+	err := q.client.HSet(ctx, key, taskID, status).Err()
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+// GetTaskStatus retrieves the status of a task from redis
+func (q *RedisQueue) GetTaskStatus(key string, taskID string) (string, error) {
+	status, err := q.client.HGet(ctx, key, taskID).Result()
+	if err == redis.Nil {
+		return "", nil // task not found
+	}
+	return status, err
+}
+
+// retry func
+func (q *RedisQueue) IncrementRetryCount(key string, taskID string) (int64, error) {
+	retryCount, err := q.client.HIncrBy(ctx, key, taskID, 1).Result()
+
+	if err != nil {
+		return 0, err
+	}
+	return int64(retryCount), nil
+}
