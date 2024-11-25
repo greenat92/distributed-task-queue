@@ -1,13 +1,17 @@
 package main
 
 import (
+	"context"
 	"distributed-task-queue/internal"
 	"distributed-task-queue/internal/monitoring"
 	"distributed-task-queue/internal/queue"
 	"fmt"
 	"log"
 	"net/http"
+	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -30,23 +34,14 @@ func main() {
 	// Initialize Redis connection
 	redisQueue = queue.NewRedisQueue("localhost:6379")
 
+	// setup shudown handling
+	ctx, cancel := context.WithCancel(context.Background())
+	go handleShutdown(cancel)
+
 	log.Println("Starting Worker...")
+
 	// Start polling for tasks
-	for {
-		task, err := redisQueue.Dequeue("task_queue")
-		if err != nil {
-			log.Printf("Error dequeuing task: %v", err)
-			time.Sleep(2 * time.Second) // Retry after a short delay
-			continue
-		}
-
-		if task != "" {
-			log.Printf("Task dequeued: %s", task)
-			go processTask(task) // Process each task in a separate goroutine
-		}
-
-		time.Sleep(1 * time.Second) // Polling interval
-	}
+	startWorker(ctx)
 }
 
 func processTask(task string) {
@@ -54,45 +49,45 @@ func processTask(task string) {
 
 	parsedTask, err := parseTaskString(task)
 	if err != nil {
-		fmt.Println("Error:", err)
+		log.Printf("Error parsing task: %v", err)
 		return
 	}
 
 	taskID := parsedTask.ID
 	payload := parsedTask.Payload
-	queue := "task_status"
-	statusInprogress := "in-progress"
+	statusQueue := "task_status"
+	statusInProgress := "in-progress"
 	statusFailed := "failed"
 	statusCompleted := "completed"
 
-	// Upate status to in porgress
-	err = redisQueue.SetTaskStatus(queue, taskID, statusInprogress)
+	// Update task status to "in-progress"
+	err = redisQueue.SetTaskStatus(statusQueue, taskID, statusInProgress)
 	if err != nil {
 		log.Printf("Failed to update task status: %v", err)
 		return
 	}
 
-	log.Printf("processing task: %s", taskID)
+	log.Printf("Processing task: %s", taskID)
 
-	// simulate task processing with a delay
+	// Simulate task processing with a delay
 	time.Sleep(3 * time.Second)
 
-	// simulate processing success or failure
+	// Simulate success or failure
 	if strings.Contains(payload, "fail") {
-		log.Printf("Task Failed: %s", taskID)
-		redisQueue.SetTaskStatus(queue, taskID, statusFailed)
-		enqueueRetry(task) // retry the task
+		log.Printf("Task failed: %s", taskID)
+		redisQueue.SetTaskStatus(statusQueue, taskID, statusFailed)
+		enqueueRetry(task) // Retry the task
 
-		// update metrics
+		// Update metrics
 		monitoring.TasksProcessed.WithLabelValues("failed").Inc()
-		monitoring.TaskReties.Inc()
+		monitoring.TaskRetries.Inc()
 		return
 	}
 
 	log.Printf("Task completed: %s", taskID)
-	redisQueue.SetTaskStatus(queue, taskID, statusCompleted)
+	redisQueue.SetTaskStatus(statusQueue, taskID, statusCompleted)
 
-	// update metrics
+	// Update metrics
 	monitoring.TasksProcessed.WithLabelValues("success").Inc()
 	monitoring.TaskProcessingTime.Observe(float64(time.Since(startTime).Seconds()))
 }
@@ -101,38 +96,37 @@ func processTask(task string) {
 func enqueueRetry(task string) {
 	parsedTask, err := parseTaskString(task)
 	if err != nil {
-		fmt.Println("Error:", err)
+		log.Printf("Error parsing task for retry: %v", err)
 		return
 	}
 
 	taskID := parsedTask.ID
 	payload := parsedTask.Payload
-	queueRetries := "task_retries"
-	queueTask := "task_queue"
-	queueTaskStatus := "task_status"
+	retryQueue := "task_retries"
+	taskQueue := "task_queue"
+	statusQueue := "task_status"
 
-	statusFailedPermanenty := "failed-permanently"
-	statusInprogress := "in-progress"
+	statusFailedPermanently := "failed-permanently"
+	statusInProgress := "in-progress"
 
-	retryCount, err := redisQueue.IncrementRetryCount(queueRetries, taskID)
+	retryCount, err := redisQueue.IncrementRetryCount(retryQueue, taskID)
 	if err != nil {
-		log.Printf("Failed to increment retry count for task %s: %V", taskID, err)
+		log.Printf("Failed to increment retry count for task %s: %v", taskID, err)
 		return
 	}
 
 	maxRetries := 3
 	if retryCount > int64(maxRetries) {
 		log.Printf("Task %s exceeded max retries", taskID)
-		redisQueue.SetTaskStatus(queueTaskStatus, taskID, statusFailedPermanenty)
+		redisQueue.SetTaskStatus(statusQueue, taskID, statusFailedPermanently)
 		return
 	}
 
-	log.Printf("Re-engueuing task %s for retry (%d/%d)", taskID, retryCount, maxRetries)
-	err = redisQueue.Enqueue(queueTask, taskID, payload, statusInprogress)
+	log.Printf("Re-enqueuing task %s for retry (%d/%d)", taskID, retryCount, maxRetries)
+	err = redisQueue.Enqueue(taskQueue, taskID, payload, statusInProgress)
 	if err != nil {
 		log.Printf("Failed to re-enqueue task %s: %v", taskID, err)
 	}
-
 }
 
 // parseTaskString parses the input string and returns a Task struct.
@@ -143,11 +137,45 @@ func parseTaskString(input string) (internal.Task, error) {
 	}
 
 	// Create a Task with ID and Status from the first two elements
-	task := internal.Task{
+	return internal.Task{
 		ID:      parts[0],
 		Payload: parts[1],
 		Status:  parts[2],
-	}
+	}, nil
+}
 
-	return task, nil
+func startWorker(ctx context.Context) {
+	taskQueue := "task_queue"
+	for {
+		select {
+		case <-ctx.Done():
+			log.Println("Shutting down worker...")
+			return
+		default:
+			// pool for tasks
+			task, err := redisQueue.Dequeue(taskQueue)
+			if err != nil {
+				if strings.Contains(err.Error(), "nil") {
+					time.Sleep(1 * time.Second) // No task available, wait before retrying
+					continue
+				}
+				log.Printf("Error dequeuing task: %v", err)
+				time.Sleep(2 * time.Second) // Retry after a short delay
+				continue
+			}
+			if task != "" {
+				log.Printf("Task dequeued: %s", task)
+				go processTask(task) // process each task in a separate goroutine
+			}
+		}
+	}
+}
+
+func handleShutdown(cancel context.CancelFunc) {
+	ch := make(chan os.Signal, 1)
+	signal.Notify(ch, syscall.SIGINT, syscall.SIGTERM)
+
+	<-ch
+	log.Println("Received shutdown signal")
+	cancel()
 }

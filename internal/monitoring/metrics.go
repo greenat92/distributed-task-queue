@@ -14,7 +14,7 @@ var (
 		[]string{"status"},
 	)
 
-	TaskReties = prometheus.NewCounter(
+	TaskRetries = prometheus.NewCounter(
 		prometheus.CounterOpts{
 			Name: "task_retires_total",
 			Help: "Total number of task retries",
@@ -33,6 +33,6 @@ var (
 // Register metrics
 func InitMetrics() {
 	prometheus.MustRegister(TasksProcessed)
-	prometheus.MustRegister(TaskReties)
+	prometheus.MustRegister(TaskRetries)
 	prometheus.MustRegister(TaskProcessingTime)
 }
